@@ -1,4 +1,31 @@
 ---
+- name: Check Let's Encrypt credentials
+  ansible.builtin.assert:
+    that:
+      - cloudflare_api_token is defined
+      - cloudflare_api_token | length > 20
+      - cloudflare_api_token != 'replace-me'
+      - acme_email is defined
+      - acme_email is match('^[^@ ]+@[^@ ]+\.[^@ ]+$')
+      - acme_email != 'you@example.com'
+    fail_msg: Set cloudflare_api_token and a real acme_email in secrets.yml before running cert-manager.
+
+- name: Read the default ingress controller domain
+  kubernetes.core.k8s_info:
+    api_version: operator.openshift.io/v1
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+  register: default_ingress
+
+- name: Check the default ingress controller domain
+  ansible.builtin.assert:
+    that:
+      - default_ingress.resources | length == 1
+      - default_ingress.resources[0].status.domain is defined
+      - default_ingress.resources[0].status.domain | length > 3
+    fail_msg: The default IngressController must report its domain before requesting a certificate.
+
 - name: Create cert-manager Operator namespace
   kubernetes.core.k8s:
     state: present
@@ -46,3 +73,161 @@
     | map(attribute='status.phase') | select('equalto', 'Succeeded') | list | length > 0
   retries: 30
   delay: 10
+
+- name: Wait for cert-manager webhook to have a ready endpoint
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Endpoints
+    name: cert-manager-webhook
+    namespace: cert-manager
+  register: webhook_endpoints
+  until: >
+    webhook_endpoints.resources | length > 0
+    and webhook_endpoints.resources[0].subsets | default([])
+    | selectattr('addresses') | list | length > 0
+  retries: 30
+  delay: 10
+
+- name: Store Cloudflare API token for the ClusterIssuer
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: cloudflare-api-token
+        namespace: cert-manager
+      type: Opaque
+      data:
+        api-token: "{{ cloudflare_api_token | b64encode }}"
+  no_log: true
+
+- name: Create Let's Encrypt ClusterIssuer
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cert-manager.io/v1
+      kind: ClusterIssuer
+      metadata:
+        name: letsencrypt
+      spec:
+        acme:
+          server: https://acme-v02.api.letsencrypt.org/directory
+          email: "{{ acme_email }}"
+          privateKeySecretRef:
+            name: letsencrypt-account-key
+          solvers:
+            - dns01:
+                cloudflare:
+                  apiTokenSecretRef:
+                    name: cloudflare-api-token
+                    key: api-token
+
+- name: Wait for Let's Encrypt ClusterIssuer to be Ready
+  kubernetes.core.k8s_info:
+    api_version: cert-manager.io/v1
+    kind: ClusterIssuer
+    name: letsencrypt
+  register: letsencrypt_issuer
+  until: >
+    letsencrypt_issuer.resources | length > 0
+    and letsencrypt_issuer.resources[0].status.conditions is defined
+    and letsencrypt_issuer.resources[0].status.conditions
+    | selectattr('type', 'equalto', 'Ready')
+    | selectattr('status', 'equalto', 'True') | list | length > 0
+  retries: 60
+  delay: 10
+
+- name: Request certificate for default ingress domain
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: apps-wildcard
+        namespace: openshift-ingress
+      spec:
+        secretName: apps-wildcard-tls
+        dnsNames:
+          - "{{ default_ingress.resources[0].status.domain }}"
+          - "*.{{ default_ingress.resources[0].status.domain }}"
+        issuerRef:
+          kind: ClusterIssuer
+          name: letsencrypt
+
+- name: Wait for ingress certificate to be Ready for this generation
+  kubernetes.core.k8s_info:
+    api_version: cert-manager.io/v1
+    kind: Certificate
+    name: apps-wildcard
+    namespace: openshift-ingress
+  register: apps_cert
+  until: >
+    apps_cert.resources | length > 0
+    and apps_cert.resources[0].status.conditions is defined
+    and apps_cert.resources[0].status.conditions
+    | selectattr('type', 'equalto', 'Ready')
+    | selectattr('status', 'equalto', 'True')
+    | selectattr('observedGeneration', 'equalto', apps_cert.resources[0].metadata.generation)
+    | list | length > 0
+  retries: 90
+  delay: 10
+
+- name: Read current router deployment generation
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: router-default
+    namespace: openshift-ingress
+  register: router_before
+
+- name: Use Let's Encrypt certificate for the default ingress controller
+  kubernetes.core.k8s:
+    state: present
+    merge_type: merge
+    definition:
+      apiVersion: operator.openshift.io/v1
+      kind: IngressController
+      metadata:
+        name: default
+        namespace: openshift-ingress-operator
+      spec:
+        defaultCertificate:
+          name: apps-wildcard-tls
+  register: ingress_certificate_update
+
+- name: Wait for router deployment to roll out the new certificate
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: router-default
+    namespace: openshift-ingress
+  register: router_after
+  until: >
+    router_after.resources is defined
+    and router_after.resources | length > 0
+    and router_after.resources[0].metadata.generation | int
+      > router_before.resources[0].metadata.generation | int
+    and router_after.resources[0].status.observedGeneration | default(0) | int
+      >= router_after.resources[0].metadata.generation | int
+    and router_after.resources[0].status.updatedReplicas | default(0) | int
+      >= router_after.resources[0].spec.replicas | default(1) | int
+    and router_after.resources[0].status.availableReplicas | default(0) | int
+      >= router_after.resources[0].spec.replicas | default(1) | int
+  retries: 30
+  delay: 5
+  when: ingress_certificate_update is changed
+
+- name: Wait for ClusterOperators to be healthy after ingress certificate change
+  ansible.builtin.command: "oc wait clusteroperators --all --for=condition={{ item }} --timeout=60s"
+  loop:
+    - Available=True
+    - Progressing=False
+    - Degraded=False
+  register: clusteroperators_after
+  until: clusteroperators_after.rc == 0
+  retries: 5
+  delay: 10
+  changed_when: false
+  when: ingress_certificate_update is changed

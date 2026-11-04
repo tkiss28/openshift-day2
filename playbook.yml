@@ -22,11 +22,11 @@
   roles:
     - role: auth
       tags: auth
+    - role: cert_manager
+      tags: cert-manager
     - role: nmstate
       tags: nmstate
     - role: storage
       tags: storage
     - role: virtualization
       tags: virtualization
-    - role: cert_manager
-      tags: cert-manager
