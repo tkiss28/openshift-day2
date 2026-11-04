@@ -28,7 +28,7 @@
       tags: lvm
     - role: podlimit
       tags: podlimit
-    - role: nmstate
-      tags: nmstate
-    - role: virtualization
-      tags: virtualization
+    - role: kubevirt
+      tags: kubevirt
+    - role: kubevirt_smoketest
+      tags: [never, kubevirt-smoketest]

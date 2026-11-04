@@ -94,9 +94,8 @@ To run tasks selectively `--tags` or `--skip-tags` can be used:
 | cert-manager + Let's Encrypt        | `cert-manager`       | Installs the operator, issues a certificate for the default ingress domain and its wildcard via Cloudflare DNS-01, then configures the default router.  |
 | LVM Storage                         | `lvm`                | Installs the operator and creates an `LVMCluster` on the configured disk(s); wipe them manually first.                                                  |
 | Master node pod limit               | `podlimit`           | Sets `maxPods` to 500 and disables the per-core cap on master nodes; waits for the node limit to take effect.                                            |
-| NMState                             | `nmstate`            | Installs the operator and starts the handler.                                                                                                           |
-| OpenShift Virtualization (KubeVirt) | `virtualization`     | Installs the operator and the default `HyperConverged` configuration.                                                                                   |
-| External VM network mapping         | `virtualization`     | Maps `br-ex` to `localnet1` via NMState; requires the `nmstate` section on a fresh install.                                                             |
+| OpenShift Virtualization (KubeVirt) | `kubevirt`           | Installs NMState and Virtualization, then maps `br-ex` to `localnet1` for an untagged external VM network.                                               |
+| Optional KubeVirt smoke test         | `kubevirt-smoketest` | Recreates a dedicated Fedora test VM, its untagged LAN attachment, and an LVM test disk; skipped during normal full runs.                               |
 
 The default router certificate covers the console and routes under the default
 ingress domain that do not specify their own certificate. It does **not**
@@ -120,11 +119,48 @@ For example:
 
 ```
 # Fresh install without OpenShift Virtualization or its bridge mapping
-ansible-playbook -i localhost, playbook.yml --skip-tags virtualization
+ansible-playbook -i localhost, playbook.yml --skip-tags kubevirt
 
 # Install NMState and Virtualization (including the bridge mapping)
-ansible-playbook -i localhost, playbook.yml --tags nmstate,virtualization
+ansible-playbook -i localhost, playbook.yml --tags kubevirt
 
 # Repair an operator on an unhealthy cluster without the readiness check
-ansible-playbook -i localhost, playbook.yml --tags nmstate --skip-tags readiness
+ansible-playbook -i localhost, playbook.yml --tags kubevirt --skip-tags readiness
+```
+
+## Optional KubeVirt smoke test
+
+The smoke test is the last role in `playbook.yml`, immediately after `kubevirt`,
+but is skipped during normal full runs. After `kubevirt` and `lvm` are ready,
+run it alone:
+
+```sh
+ansible-playbook -i localhost, playbook.yml --tags kubevirt-smoketest
+```
+
+**Each run deletes the entire `kubevirt-smoke` namespace first.** Use it only
+for this test; do not put other workloads or data there. The playbook reads all
+`core` SSH public keys from MachineConfig `99-master-ssh` and gives their
+holders SSH access to the test VM. Optionally set `smoke_vm_password` in the
+gitignored `secrets.yml` for **console-only** password login (requires `openssl`
+on the Ansible host); SSH password authentication stays disabled. If there are
+neither keys nor a password, it fails before deleting anything.
+
+The test leaves a Fedora VM running with an untagged LAN attachment and a blank
+LVM-backed disk. It needs access to `quay.io/containerdisks/fedora:latest` and
+DHCP on the LAN. Check the VM's LAN IP (reported by the guest agent if present,
+otherwise from your DHCP leases or VM console); the playbook prints it when
+reported. Then ping or SSH as `fedora`
+using a private key matching one in `99-master-ssh`. `Running` and a bound disk
+do not by themselves prove that LAN connectivity works. The VM's boot disk is
+temporary; its blank test disk is on `lvms-vg1`.
+
+```sh
+oc -n kubevirt-smoke get vmi fedora -o jsonpath='{.status.interfaces[?(@.name=="lan")].ipAddresses}'
+# If the LAN address is not reported, use the VM console (requires virtctl):
+virtctl console -n kubevirt-smoke fedora
+# From your LAN, after finding the address:
+ssh -i ~/.ssh/<matching-private-key> fedora@<lan-ip>
+# When finished (or if a run was interrupted):
+oc delete namespace kubevirt-smoke
 ```

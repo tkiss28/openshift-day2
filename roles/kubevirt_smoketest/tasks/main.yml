@@ -1,0 +1,198 @@
+---
+- name: Read the master's SSH keys
+  kubernetes.core.k8s_info:
+    api_version: machineconfiguration.openshift.io/v1
+    kind: MachineConfig
+    name: 99-master-ssh
+  register: master_ssh
+
+- name: Collect all core SSH keys
+  ansible.builtin.set_fact:
+    smoke_ssh_keys: >-
+      {{ master_ssh.resources
+         | map(attribute='spec.config.passwd.users', default=[]) | flatten
+         | selectattr('name', 'equalto', 'core')
+         | map(attribute='sshAuthorizedKeys', default=[]) | flatten | list }}
+
+- name: Require an SSH key or a console password
+  ansible.builtin.assert:
+    that: smoke_ssh_keys | length > 0 or smoke_vm_password | default('', true) | length > 0
+    fail_msg: Set smoke_vm_password in secrets.yml or add a core SSH key to 99-master-ssh.
+
+- name: Hash the optional console password
+  ansible.builtin.command:
+    argv: [openssl, passwd, -6, -stdin]
+    stdin: "{{ smoke_vm_password }}"
+  register: smoke_password_hash
+  when: smoke_vm_password | default('', true) | length > 0
+  no_log: true
+
+- name: Remove previous smoke-test namespace and its resources
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Namespace
+    name: kubevirt-smoke
+    state: absent
+    wait: true
+    wait_timeout: 300
+
+- name: Create smoke-test namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: kubevirt-smoke
+
+- name: Create untagged localnet attachment
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: k8s.cni.cncf.io/v1
+      kind: NetworkAttachmentDefinition
+      metadata:
+        name: lan
+        namespace: kubevirt-smoke
+      spec:
+        config: >-
+          {{ {'cniVersion': '0.3.1', 'type': 'ovn-k8s-cni-overlay',
+              'name': virt_localnet, 'topology': 'localnet',
+              'physicalNetworkName': virt_localnet,
+              'netAttachDefName': 'kubevirt-smoke/lan'} | to_json }}
+
+- name: Create LVM-backed test disk
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: test-disk
+        namespace: kubevirt-smoke
+      spec:
+        accessModes: [ReadWriteOnce]
+        volumeMode: Block
+        storageClassName: "lvms-{{ lvms_vg_name }}"
+        resources:
+          requests:
+            storage: 1Gi
+
+- name: Start Fedora test VM
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: kubevirt.io/v1
+      kind: VirtualMachine
+      metadata:
+        name: fedora
+        namespace: kubevirt-smoke
+      spec:
+        runStrategy: Always
+        template:
+          spec:
+            domain:
+              resources:
+                requests:
+                  memory: 1Gi
+              devices:
+                disks:
+                  - name: fedora
+                    disk:
+                      bus: virtio
+                  - name: test-disk
+                    disk:
+                      bus: virtio
+                  - name: cloudinit
+                    disk:
+                      bus: virtio
+                interfaces:
+                  - name: default
+                    masquerade: {}
+                  - name: lan
+                    bridge: {}
+            networks:
+              - name: default
+                pod: {}
+              - name: lan
+                multus:
+                  networkName: lan
+            volumes:
+              - name: fedora
+                containerDisk:
+                  image: quay.io/containerdisks/fedora:latest
+              - name: test-disk
+                persistentVolumeClaim:
+                  claimName: test-disk
+              - name: cloudinit
+                cloudInitNoCloud:
+                  userData: |
+                    #cloud-config
+                    users:
+                      - name: fedora
+                        lock_passwd: {{ (smoke_vm_password | default('', true) | length == 0) | to_json }}
+                        ssh_authorized_keys: {{ smoke_ssh_keys | to_json }}
+                    {% if smoke_vm_password | default('', true) | length > 0 %}
+                        passwd: {{ smoke_password_hash.stdout | to_json }}
+                    {% endif %}
+                    ssh_pwauth: false
+  no_log: true
+
+- name: Wait for Fedora VM to be Running
+  kubernetes.core.k8s_info:
+    api_version: kubevirt.io/v1
+    kind: VirtualMachineInstance
+    name: fedora
+    namespace: kubevirt-smoke
+  register: smoke_vmi
+  until: >
+    smoke_vmi.resources is defined
+    and smoke_vmi.resources | length > 0
+    and smoke_vmi.resources[0].status.phase | default('') == 'Running'
+  retries: 90
+  delay: 10
+
+- name: Confirm the LVM disk is bound
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: PersistentVolumeClaim
+    name: test-disk
+    namespace: kubevirt-smoke
+  register: smoke_disk
+  until: >
+    smoke_disk.resources is defined
+    and smoke_disk.resources | length > 0
+    and smoke_disk.resources[0].status.phase | default('') == 'Bound'
+  retries: 12
+  delay: 5
+
+- name: Allow Fedora and its guest agent to boot
+  ansible.builtin.pause:
+    seconds: 30
+
+- name: Read the Fedora VM LAN address
+  kubernetes.core.k8s_info:
+    api_version: kubevirt.io/v1
+    kind: VirtualMachineInstance
+    name: fedora
+    namespace: kubevirt-smoke
+  register: smoke_vmi_network
+
+- name: Find the Fedora VM LAN IPv4 address
+  ansible.builtin.set_fact:
+    smoke_lan_ipv4: >-
+      {% set lan = smoke_vmi_network.resources[0].status.interfaces | default([])
+        | selectattr('name', 'equalto', 'lan') | first | default({}) -%}
+      {{ (((lan.ipAddresses | default([])) + [lan.ipAddress | default('')])
+        | select('match', '^[0-9]+(\.[0-9]+){3}(/\d+)?$')
+        | first | default('')).split('/')[0] }}
+
+- name: Show smoke-test connection details
+  ansible.builtin.debug:
+    msg: >-
+      {{ ['VM: kubevirt-smoke/fedora (Running; LVM disk Bound)',
+          'LAN IPv4: ' ~ (smoke_lan_ipv4 | default('not reported; check the VM console', true))]
+         + (['SSH: ssh fedora@' ~ smoke_lan_ipv4]
+            if smoke_lan_ipv4 and smoke_ssh_keys | length > 0 else [])
+         + ['Console: virtctl console -n kubevirt-smoke fedora',
+            'Cleanup: oc delete namespace kubevirt-smoke'] }}
