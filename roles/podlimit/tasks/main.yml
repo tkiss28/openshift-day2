@@ -1,0 +1,32 @@
+---
+- name: Set the master node pod limit
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: machineconfiguration.openshift.io/v1
+      kind: KubeletConfig
+      metadata:
+        name: increase-max-pods
+      spec:
+        machineConfigPoolSelector:
+          matchLabels:
+            pools.operator.machineconfiguration.openshift.io/master: ""
+        kubeletConfig:
+          podsPerCore: 0
+          maxPods: 500
+
+- name: Wait for master nodes to advertise the new pod limit
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+    label_selectors:
+      - node-role.kubernetes.io/master
+  register: master_nodes
+  until: >
+    master_nodes.resources is defined
+    and master_nodes.resources | length > 0
+    and master_nodes.resources
+    | map(attribute='status.allocatable.pods', default=0) | map('int')
+    | unique | list == [500]
+  retries: 90
+  delay: 10

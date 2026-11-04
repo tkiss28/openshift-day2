@@ -93,6 +93,7 @@ To run tasks selectively `--tags` or `--skip-tags` can be used:
 | Local HTPasswd admin                | `auth`               | Creates the user, grants `cluster-admin`, and waits for the OAuth rollout if the identity provider changes.                                             |
 | cert-manager + Let's Encrypt        | `cert-manager`       | Installs the operator, issues a certificate for the default ingress domain and its wildcard via Cloudflare DNS-01, then configures the default router.  |
 | LVM Storage                         | `lvm`                | Installs the operator and creates an `LVMCluster` on the configured disk(s); wipe them manually first.                                                  |
+| Master node pod limit               | `podlimit`           | Sets `maxPods` to 500 and disables the per-core cap on master nodes; waits for the node limit to take effect.                                            |
 | NMState                             | `nmstate`            | Installs the operator and starts the handler.                                                                                                           |
 | OpenShift Virtualization (KubeVirt) | `virtualization`     | Installs the operator and the default `HyperConverged` configuration.                                                                                   |
 | External VM network mapping         | `virtualization`     | Maps `br-ex` to `localnet1` via NMState; requires the `nmstate` section on a fresh install.                                                             |
@@ -106,6 +107,11 @@ later renewals hot-reload the secret. After a change, the role waits for the
 router deployment to roll out and for all ClusterOperators to report Available,
 not Progressing, and not Degraded. It does not restart the ingress operator
 manually.
+
+Applying `podlimit` changes kubelet configuration through the Machine Config
+Operator. On a single-node cluster this can reboot the node and interrupt the
+API; allow for downtime and have console access before running it. The role
+waits for master nodes to report a pod capacity of 500 before the next role.
 
 Each tagged section lives in `roles/<role>/tasks/main.yml`; the readiness check
 runs first from `playbook.yml`.

@@ -26,6 +26,8 @@
       tags: cert-manager
     - role: lvm
       tags: lvm
+    - role: podlimit
+      tags: podlimit
     - role: nmstate
       tags: nmstate
     - role: virtualization
