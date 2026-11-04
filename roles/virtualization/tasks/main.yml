@@ -1,0 +1,110 @@
+---
+- name: Create Virtualization namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ virt_namespace }}"
+        labels:
+          openshift.io/cluster-monitoring: "true"
+
+- name: Create Virtualization OperatorGroup
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: kubevirt-hyperconverged-group
+        namespace: "{{ virt_namespace }}"
+      spec:
+        targetNamespaces:
+          - "{{ virt_namespace }}"
+
+- name: Subscribe to OpenShift Virtualization
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: hco-operatorhub
+        namespace: "{{ virt_namespace }}"
+      spec:
+        channel: "{{ virt_channel }}"
+        name: kubevirt-hyperconverged
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait for Virtualization CSV to succeed
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: "{{ virt_namespace }}"
+  register: virt_csvs
+  until: >
+    virt_csvs.resources
+    | selectattr('metadata.name', 'match', 'kubevirt-hyperconverged-operator.*')
+    | map(attribute='status.phase') | select('equalto', 'Succeeded') | list | length > 0
+  retries: 60
+  delay: 10
+
+- name: Deploy OpenShift Virtualization
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: hco.kubevirt.io/v1beta1
+      kind: HyperConverged
+      metadata:
+        name: kubevirt-hyperconverged
+        namespace: "{{ virt_namespace }}"
+      spec: {}
+
+- name: Wait for OpenShift Virtualization to be Available
+  kubernetes.core.k8s_info:
+    api_version: hco.kubevirt.io/v1beta1
+    kind: HyperConverged
+    name: kubevirt-hyperconverged
+    namespace: "{{ virt_namespace }}"
+  register: virt_status
+  until: >
+    virt_status.resources | length > 0
+    and virt_status.resources[0].status.conditions is defined
+    and virt_status.resources[0].status.conditions
+    | selectattr('type', 'equalto', 'Available')
+    | selectattr('status', 'equalto', 'True') | list | length > 0
+  retries: 60
+  delay: 20
+
+- name: Configure Virtualization external bridge mapping
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: nmstate.io/v1
+      kind: NodeNetworkConfigurationPolicy
+      metadata:
+        name: mapping
+      spec:
+        desiredState:
+          ovn:
+            bridge-mappings:
+              - bridge: "{{ virt_bridge }}"
+                localnet: "{{ virt_localnet }}"
+                state: present
+
+- name: Wait for external bridge mapping to be Available
+  kubernetes.core.k8s_info:
+    api_version: nmstate.io/v1
+    kind: NodeNetworkConfigurationPolicy
+    name: mapping
+  register: mapping_status
+  until: >
+    mapping_status.resources | length > 0
+    and mapping_status.resources[0].status.conditions is defined
+    and mapping_status.resources[0].status.conditions
+    | selectattr('type', 'equalto', 'Available')
+    | selectattr('status', 'equalto', 'True') | list | length > 0
+  retries: 30
+  delay: 10

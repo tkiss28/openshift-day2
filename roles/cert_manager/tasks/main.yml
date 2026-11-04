@@ -1,0 +1,48 @@
+---
+- name: Create cert-manager Operator namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ cert_manager_namespace }}"
+
+- name: Create cert-manager OperatorGroup
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: openshift-cert-manager-operator
+        namespace: "{{ cert_manager_namespace }}"
+      spec: {}
+
+- name: Subscribe to cert-manager Operator
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: openshift-cert-manager-operator
+        namespace: "{{ cert_manager_namespace }}"
+      spec:
+        channel: "{{ cert_manager_channel }}"
+        name: openshift-cert-manager-operator
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait for cert-manager CSV to succeed
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: "{{ cert_manager_namespace }}"
+  register: cert_manager_csvs
+  until: >
+    cert_manager_csvs.resources
+    | selectattr('metadata.name', 'match', 'cert-manager-operator.*')
+    | map(attribute='status.phase') | select('equalto', 'Succeeded') | list | length > 0
+  retries: 30
+  delay: 10

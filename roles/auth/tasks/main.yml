@@ -1,0 +1,105 @@
+---
+- name: Configure htpasswd secret
+  block:
+    - name: Generate htpasswd file locally
+      community.general.htpasswd:
+        path: "{{ playbook_dir }}/.htpasswd"
+        name: "{{ htpasswd_username }}"
+        password: "{{ htpasswd_password }}"
+        crypt_scheme: bcrypt
+        mode: "0600"
+      no_log: true
+
+    - name: Read generated htpasswd file
+      ansible.builtin.slurp:
+        src: "{{ playbook_dir }}/.htpasswd"
+      register: htpasswd_file
+      no_log: true
+
+    - name: Create/update htpasswd secret in openshift-config
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: htpasswd-secret
+            namespace: openshift-config
+          type: Opaque
+          data:
+            htpasswd: "{{ htpasswd_file.content }}"
+      no_log: true
+  always:
+    - name: Remove local htpasswd temp file
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/.htpasswd"
+        state: absent
+
+- name: Read current OAuth deployment generation
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: oauth-openshift
+    namespace: openshift-authentication
+  register: oauth_deployment_before
+
+- name: Configure HTPasswd identity provider on the cluster OAuth
+  kubernetes.core.k8s:
+    state: present
+    merge_type: merge
+    definition:
+      apiVersion: config.openshift.io/v1
+      kind: OAuth
+      metadata:
+        name: cluster
+      spec:
+        identityProviders:
+          - name: htpasswd
+            mappingMethod: claim
+            type: HTPasswd
+            htpasswd:
+              fileData:
+                name: htpasswd-secret
+  register: oauth_config
+
+- name: Grant cluster-admin to the htpasswd user
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: "{{ htpasswd_username }}-cluster-admin"
+      subjects:
+        - kind: User
+          name: "{{ htpasswd_username }}"
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cluster-admin
+
+- name: Wait for OAuth deployment to roll out the identity provider change
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: oauth-openshift
+    namespace: openshift-authentication
+  register: oauth_deployment
+  until: >
+    oauth_deployment.resources | length > 0
+    and oauth_deployment.resources[0].metadata.generation | int
+      > oauth_deployment_before.resources[0].metadata.generation | int
+    and oauth_deployment.resources[0].status.observedGeneration | default(0) | int
+      >= oauth_deployment.resources[0].metadata.generation | int
+    and oauth_deployment.resources[0].status.updatedReplicas | default(0) | int
+      >= oauth_deployment.resources[0].spec.replicas | default(1) | int
+    and oauth_deployment.resources[0].status.availableReplicas | default(0) | int
+      >= oauth_deployment.resources[0].spec.replicas | default(1) | int
+  retries: 60
+  delay: 5
+  when: oauth_config is changed
+
+- name: Wait for Authentication Operator to stop progressing
+  ansible.builtin.command: oc wait clusteroperator/authentication --for=condition=Progressing=False --timeout=5m
+  changed_when: false
+  when: oauth_config is changed

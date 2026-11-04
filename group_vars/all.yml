@@ -1,0 +1,19 @@
+---
+htpasswd_username: admin
+
+nmstate_namespace: openshift-nmstate
+nmstate_channel: stable
+
+lvms_namespace: openshift-storage
+lvms_channel: stable-4.21
+lvms_vg_name: vg1
+lvms_device_paths:
+  - /dev/nvme0n1
+
+virt_namespace: openshift-cnv
+virt_channel: stable
+virt_bridge: br-ex
+virt_localnet: localnet1
+
+cert_manager_namespace: cert-manager-operator
+cert_manager_channel: stable-v1

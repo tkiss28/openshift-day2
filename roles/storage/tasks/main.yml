@@ -1,0 +1,87 @@
+---
+- name: Create LVMS namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ lvms_namespace }}"
+        labels:
+          openshift.io/cluster-monitoring: "true"
+
+- name: Create LVMS OperatorGroup
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: "{{ lvms_namespace }}-operatorgroup"
+        namespace: "{{ lvms_namespace }}"
+      spec:
+        targetNamespaces:
+          - "{{ lvms_namespace }}"
+
+- name: Subscribe to lvms-operator
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: lvms-operator
+        namespace: "{{ lvms_namespace }}"
+      spec:
+        channel: "{{ lvms_channel }}"
+        name: lvms-operator
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait for LVMS CSV to succeed
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: "{{ lvms_namespace }}"
+  register: lvms_csvs
+  until: >
+    lvms_csvs.resources
+    | selectattr('metadata.name', 'match', 'lvms-operator.*')
+    | map(attribute='status.phase') | select('equalto', 'Succeeded') | list | length > 0
+  retries: 30
+  delay: 10
+
+- name: Deploy LVMCluster
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: lvm.topolvm.io/v1alpha1
+      kind: LVMCluster
+      metadata:
+        name: lvmcluster
+        namespace: "{{ lvms_namespace }}"
+      spec:
+        storage:
+          deviceClasses:
+            - name: "{{ lvms_vg_name }}"
+              deviceSelector:
+                paths: "{{ lvms_device_paths }}"
+              thinPoolConfig:
+                name: thin-pool-1
+                sizePercent: 90
+                overprovisionRatio: 10
+              default: true
+
+- name: Wait for LVMCluster to be Ready
+  kubernetes.core.k8s_info:
+    api_version: lvm.topolvm.io/v1alpha1
+    kind: LVMCluster
+    name: lvmcluster
+    namespace: "{{ lvms_namespace }}"
+  register: lvmcluster_status
+  until: >
+    lvmcluster_status.resources | length > 0
+    and lvmcluster_status.resources[0].status.state is defined
+    and lvmcluster_status.resources[0].status.state == "Ready"
+  retries: 30
+  delay: 10

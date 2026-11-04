@@ -1,0 +1,4 @@
+secrets.yml
+.htpasswd
+*.retry
+.venv/

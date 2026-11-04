@@ -1,0 +1,32 @@
+---
+- name: OpenShift day-2 configuration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  vars_files:
+    - group_vars/all.yml
+    - secrets.yml
+
+  pre_tasks:
+    - name: Wait for cluster operators to be healthy
+      tags: [always, readiness]
+      ansible.builtin.command: "oc wait clusteroperators --all --for=condition={{ item }} --timeout=30s"
+      loop:
+        - Available=True
+        - Progressing=False
+        - Degraded=False
+      changed_when: false
+
+  roles:
+    - role: auth
+      tags: auth
+    - role: nmstate
+      tags: nmstate
+    - role: storage
+      tags: storage
+    - role: virtualization
+      tags: virtualization
+    - role: cert_manager
+      tags: cert-manager
