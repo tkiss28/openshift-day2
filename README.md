@@ -34,12 +34,12 @@ oc get machineconfig
 oc edit machineconfig 99-master-ssh
 ```
 
-### Wipe the storage disk (manual, destructive — not automated)
+### Wipe the storage disk (manual, destructive)
 
 This is required if the node has more disks and LVM storage was used on it
 before. Confirm `/dev/nvme0n1` is the **data disk, not the OS disk**, and that
 `vg1` belongs only to it (see `lvms_device_paths` and `lvms_vg_name` in
-`group_vars/all.yml`). Then, before running `storage`:
+`group_vars/all.yml`). Then, before running `lvm`:
 
 ```sh
 $NODE=<node>
@@ -92,8 +92,8 @@ To run tasks selectively `--tags` or `--skip-tags` can be used:
 | Cluster readiness check             | `readiness` (always) | Checks all ClusterOperators are Available, not Progressing, and not Degraded before any tasks run; at most 30 seconds per condition (90 seconds total). |
 | Local HTPasswd admin                | `auth`               | Creates the user, grants `cluster-admin`, and waits for the OAuth rollout if the identity provider changes.                                             |
 | cert-manager + Let's Encrypt        | `cert-manager`       | Installs the operator, issues a certificate for the default ingress domain and its wildcard via Cloudflare DNS-01, then configures the default router.  |
+| LVM Storage                         | `lvm`                | Installs the operator and creates an `LVMCluster` on the configured disk(s); wipe them manually first.                                                  |
 | NMState                             | `nmstate`            | Installs the operator and starts the handler.                                                                                                           |
-| LVM Storage                         | `storage`            | Installs the operator and creates an `LVMCluster` on the configured disk(s); wipe them manually first.                                                  |
 | OpenShift Virtualization (KubeVirt) | `virtualization`     | Installs the operator and the default `HyperConverged` configuration.                                                                                   |
 | External VM network mapping         | `virtualization`     | Maps `br-ex` to `localnet1` via NMState; requires the `nmstate` section on a fresh install.                                                             |
 

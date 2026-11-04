@@ -24,9 +24,9 @@
       tags: auth
     - role: cert_manager
       tags: cert-manager
+    - role: lvm
+      tags: lvm
     - role: nmstate
       tags: nmstate
-    - role: storage
-      tags: storage
     - role: virtualization
       tags: virtualization

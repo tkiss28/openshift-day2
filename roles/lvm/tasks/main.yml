@@ -83,5 +83,5 @@
     lvmcluster_status.resources | length > 0
     and lvmcluster_status.resources[0].status.state is defined
     and lvmcluster_status.resources[0].status.state == "Ready"
-  retries: 30
+  retries: 45
   delay: 10
