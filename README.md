@@ -60,9 +60,10 @@ cp -n secrets.yml.example secrets.yml
 # edit secrets.yml with your HTPasswd username/password, token and email
 ```
 
-Scope the Cloudflare token to the public DNS zone containing the cluster's
-ingress domain, with **Zone → DNS → Edit** and **Zone → Zone → Read**
-permissions. The email address is not secret, but is the ACME account contact;
+Create the Cloudflare token under **Account API Tokens** and scope it to the
+public DNS zone containing the cluster's ingress domain, with
+**Zone → DNS → Edit** and **Zone → Zone → Read** permissions. The email address
+is not secret, but is the ACME account contact;
 do not use `noreply@redhat.com`. cert-manager discovers the default ingress
 domain from OpenShift, so you do not need to enter the certificate DNS names
 yourself. Check that this domain belongs to your Cloudflare-managed zone before
