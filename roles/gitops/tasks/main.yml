@@ -1,0 +1,153 @@
+---
+- name: Create GitOps operator namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ gitops_namespace }}"
+        labels:
+          openshift.io/cluster-monitoring: "true"
+
+- name: Create GitOps OperatorGroup
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: "{{ gitops_namespace }}"
+        namespace: "{{ gitops_namespace }}"
+      spec: {}
+
+- name: Subscribe to OpenShift GitOps
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: openshift-gitops-operator
+        namespace: "{{ gitops_namespace }}"
+      spec:
+        channel: "{{ gitops_channel }}"
+        name: openshift-gitops-operator
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait for GitOps CSV to succeed
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: "{{ gitops_namespace }}"
+  register: gitops_csvs
+  until: >
+    gitops_csvs.resources
+    | selectattr('metadata.name', 'match', 'openshift-gitops-operator.*')
+    | map(attribute='status.phase') | select('equalto', 'Succeeded') | list | length > 0
+  retries: 60
+  delay: 10
+
+- name: Wait for default Argo CD instance to be Available
+  kubernetes.core.k8s_info:
+    api_version: argoproj.io/v1beta1
+    kind: ArgoCD
+    name: openshift-gitops
+    namespace: openshift-gitops
+  register: gitops_argocd
+  until: >
+    gitops_argocd.resources | length > 0
+    and gitops_argocd.resources[0].status.phase | default('') == 'Available'
+  retries: 60
+  delay: 10
+
+- name: Wait for Argo CD server to be ready
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: openshift-gitops-server
+    namespace: openshift-gitops
+  register: gitops_server
+  until: >
+    gitops_server.resources | length > 0
+    and gitops_server.resources[0].status.availableReplicas | default(0) | int > 0
+  retries: 60
+  delay: 10
+
+- name: Grant Argo CD application-controller cluster-admin for ssc-demo
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: openshift-gitops-application-controller-admin
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cluster-admin
+      subjects:
+        - kind: ServiceAccount
+          name: openshift-gitops-argocd-application-controller
+          namespace: openshift-gitops
+
+- name: Confirm Argo CD can manage demo resources
+  ansible.builtin.command: >
+    oc auth can-i patch services -n artifactory
+    --as=system:serviceaccount:openshift-gitops:openshift-gitops-argocd-application-controller
+    --quiet
+  changed_when: false
+  register: gitops_controller_can_patch
+  until: gitops_controller_can_patch.rc == 0
+  retries: 6
+  delay: 5
+
+- name: Give Argo CD application-controller room for demo bootstrap
+  kubernetes.core.k8s:
+    state: present
+    merge_type: merge
+    definition:
+      apiVersion: argoproj.io/v1beta1
+      kind: ArgoCD
+      metadata:
+        name: openshift-gitops
+        namespace: openshift-gitops
+      spec:
+        controller:
+          resources:
+            requests:
+              memory: 2Gi
+            limits:
+              memory: 8Gi
+
+- name: Wait for Argo CD application-controller to roll out
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: StatefulSet
+    name: openshift-gitops-application-controller
+    namespace: openshift-gitops
+  register: gitops_controller
+  until: >
+    gitops_controller.resources | length == 1
+    and gitops_controller.resources[0].spec.template.spec.containers
+    | selectattr('resources.requests.memory', 'equalto', '2Gi')
+    | selectattr('resources.limits.memory', 'equalto', '8Gi') | list | length > 0
+    and gitops_controller.resources[0].status.observedGeneration | default(0) | int >= gitops_controller.resources[0].metadata.generation | int
+    and gitops_controller.resources[0].status.updatedReplicas | default(0) | int == gitops_controller.resources[0].spec.replicas | int
+    and gitops_controller.resources[0].status.readyReplicas | default(0) | int == gitops_controller.resources[0].spec.replicas | int
+  retries: 60
+  delay: 10
+
+- name: Wait for Argo CD to be Available after the rollout
+  kubernetes.core.k8s_info:
+    api_version: argoproj.io/v1beta1
+    kind: ArgoCD
+    name: openshift-gitops
+    namespace: openshift-gitops
+  register: gitops_argocd
+  until: >
+    gitops_argocd.resources | length > 0
+    and gitops_argocd.resources[0].status.phase | default('') == 'Available'
+  retries: 60
+  delay: 10

@@ -1,0 +1,236 @@
+---
+- name: Check LVMCluster
+  kubernetes.core.k8s_info:
+    api_version: lvm.topolvm.io/v1alpha1
+    kind: LVMCluster
+    name: lvmcluster
+    namespace: "{{ lvms_namespace }}"
+  register: noobaa_lvmcluster
+
+- name: Check LVM StorageClass
+  kubernetes.core.k8s_info:
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+    name: "lvms-{{ lvms_vg_name }}"
+  register: noobaa_storage_class
+
+- name: Check storage OperatorGroups
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1
+    kind: OperatorGroup
+    namespace: "{{ lvms_namespace }}"
+  register: noobaa_operatorgroups
+
+- name: Require ready LVM storage and the existing OperatorGroup
+  ansible.builtin.assert:
+    that:
+      - noobaa_lvmcluster.resources | length == 1
+      - noobaa_lvmcluster.resources[0].status.state | default('') == 'Ready'
+      - noobaa_storage_class.resources | length == 1
+      - noobaa_storage_class.resources[0].provisioner == 'topolvm.io'
+      - noobaa_operatorgroups.resources | length == 1
+      - noobaa_operatorgroups.resources[0].metadata.name == lvms_namespace ~ '-operatorgroup'
+      - noobaa_operatorgroups.resources[0].spec.targetNamespaces == [lvms_namespace]
+
+- name: Subscribe to OpenShift Data Foundation
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: odf-operator
+        namespace: "{{ lvms_namespace }}"
+      spec:
+        channel: "{{ odf_channel }}"
+        name: odf-operator
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait for ODF CSVs to succeed
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: "{{ lvms_namespace }}"
+  register: noobaa_csvs
+  until: >
+    noobaa_csvs.resources
+    | selectattr('metadata.name', 'match', item ~ '.*')
+    | map(attribute='status.phase') | select('equalto', 'Succeeded') | list | length > 0
+  loop:
+    - odf-operator
+    - ocs-operator
+    - mcg-operator
+    - rook-ceph-operator
+  retries: 60
+  delay: 10
+
+- name: Wait for StorageCluster CRD to be established
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: storageclusters.ocs.openshift.io
+  register: noobaa_storagecluster_crd
+  until: >
+    noobaa_storagecluster_crd.resources | length == 1
+    and noobaa_storagecluster_crd.resources[0].status.conditions | default([])
+    | selectattr('type', 'equalto', 'Established')
+    | selectattr('status', 'equalto', 'True') | list | length > 0
+  retries: 60
+  delay: 10
+
+- name: Check for existing StorageClusters
+  kubernetes.core.k8s_info:
+    api_version: ocs.openshift.io/v1
+    kind: StorageCluster
+  register: noobaa_storageclusters
+
+- name: Refuse to change an existing StorageCluster
+  ansible.builtin.assert:
+    that:
+      - >
+        noobaa_storageclusters.resources | length == 0
+        or (noobaa_storageclusters.resources | length == 1
+        and noobaa_storageclusters.resources[0].metadata.name == 'ocs-storagecluster'
+        and noobaa_storageclusters.resources[0].metadata.namespace == lvms_namespace
+        and noobaa_storageclusters.resources[0].spec.multiCloudGateway.reconcileStrategy | default('') == 'standalone'
+        and noobaa_storageclusters.resources[0].spec.multiCloudGateway.dbStorageClassName | default('') == 'lvms-' ~ lvms_vg_name
+        and noobaa_storageclusters.resources[0].spec.storageDeviceSets | default([]) | length == 0)
+
+- name: Deploy standalone NooBaa StorageCluster
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: ocs.openshift.io/v1
+      kind: StorageCluster
+      metadata:
+        name: ocs-storagecluster
+        namespace: "{{ lvms_namespace }}"
+      spec:
+        multiCloudGateway:
+          reconcileStrategy: standalone
+          dbStorageClassName: "lvms-{{ lvms_vg_name }}"
+
+- name: Wait for NooBaa to be Ready
+  kubernetes.core.k8s_info:
+    api_version: noobaa.io/v1alpha1
+    kind: NooBaa
+    name: noobaa
+    namespace: "{{ lvms_namespace }}"
+  register: noobaa_status
+  until: >
+    noobaa_status.resources | length == 1
+    and noobaa_status.resources[0].status.phase | default('') == 'Ready'
+  retries: 120
+  delay: 15
+
+- name: Wait for default BackingStore
+  kubernetes.core.k8s_info:
+    api_version: noobaa.io/v1alpha1
+    kind: BackingStore
+    name: noobaa-default-backing-store
+    namespace: "{{ lvms_namespace }}"
+  register: noobaa_backingstore
+  until: noobaa_backingstore.resources | length == 1
+  retries: 60
+  delay: 10
+
+- name: Require LVM-backed default BackingStore
+  ansible.builtin.assert:
+    that:
+      - noobaa_backingstore.resources[0].spec.type == 'pv-pool'
+      - noobaa_backingstore.resources[0].spec.pvPool.storageClass == 'lvms-' ~ lvms_vg_name
+
+- name: Set default BackingStore agent resources for Quay
+  kubernetes.core.k8s:
+    state: present
+    merge_type: merge
+    definition:
+      apiVersion: noobaa.io/v1alpha1
+      kind: BackingStore
+      metadata:
+        name: noobaa-default-backing-store
+        namespace: "{{ lvms_namespace }}"
+      spec:
+        pvPool:
+          resources:
+            requests:
+              storage: 50Gi
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 4Gi
+
+- name: Wait for default BackingStore to be Ready
+  kubernetes.core.k8s_info:
+    api_version: noobaa.io/v1alpha1
+    kind: BackingStore
+    name: noobaa-default-backing-store
+    namespace: "{{ lvms_namespace }}"
+  register: noobaa_backingstore
+  until: >
+    noobaa_backingstore.resources | length == 1
+    and noobaa_backingstore.resources[0].status.phase | default('') == 'Ready'
+  retries: 120
+  delay: 15
+
+- name: Wait for standalone StorageCluster to be Ready
+  kubernetes.core.k8s_info:
+    api_version: ocs.openshift.io/v1
+    kind: StorageCluster
+    name: ocs-storagecluster
+    namespace: "{{ lvms_namespace }}"
+  register: noobaa_storagecluster_status
+  until: >
+    noobaa_storagecluster_status.resources | length == 1
+    and noobaa_storagecluster_status.resources[0].status.phase | default('') == 'Ready'
+  retries: 120
+  delay: 15
+
+- name: Check NooBaa database PVCs
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: PersistentVolumeClaim
+    namespace: "{{ lvms_namespace }}"
+  register: noobaa_pvcs
+
+- name: Require bound NooBaa database PVCs on LVM
+  ansible.builtin.assert:
+    that:
+      - noobaa_db_pvcs | length > 0
+      - noobaa_db_pvcs | selectattr('spec.storageClassName', 'equalto', 'lvms-' ~ lvms_vg_name) | list | length == noobaa_db_pvcs | length
+      - noobaa_db_pvcs | selectattr('status.phase', 'equalto', 'Bound') | list | length == noobaa_db_pvcs | length
+  vars:
+    noobaa_db_pvcs: "{{ noobaa_pvcs.resources | selectattr('metadata.name', 'match', '^noobaa-db-pg-cluster-[0-9]+$') | list }}"
+
+- name: Wait for NooBaa ObjectBucketClaim StorageClass
+  kubernetes.core.k8s_info:
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+    name: "{{ lvms_namespace }}.noobaa.io"
+  register: noobaa_obc_class
+  until: noobaa_obc_class.resources | length == 1
+  retries: 60
+  delay: 10
+
+- name: Wait for S3 Route to be admitted
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: s3
+    namespace: "{{ lvms_namespace }}"
+  register: noobaa_s3_route
+  until: >
+    noobaa_s3_route.resources | length == 1
+    and noobaa_s3_route.resources[0].status.ingress | default([])
+    | selectattr('conditions', 'defined')
+    | map(attribute='conditions') | flatten
+    | selectattr('type', 'equalto', 'Admitted')
+    | selectattr('status', 'equalto', 'True') | list | length > 0
+  retries: 60
+  delay: 10
+
+- name: Report NooBaa S3 endpoint
+  ansible.builtin.debug:
+    msg: "S3 endpoint: https://{{ noobaa_s3_route.resources[0].status.ingress[0].host }}:443"

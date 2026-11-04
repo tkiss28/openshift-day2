@@ -31,4 +31,9 @@
     - role: kubevirt
       tags: kubevirt
     - role: kubevirt_smoketest
-      tags: [never, kubevirt-smoketest]
+      tags: kubevirt-smoketest
+      when: "'kubevirt' not in ansible_skip_tags"
+    - role: gitops
+      tags: gitops
+    - role: noobaa
+      tags: noobaa

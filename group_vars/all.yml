@@ -8,6 +8,8 @@ lvms_vg_name: vg1
 lvms_device_paths:
   - /dev/nvme0n1
 
+odf_channel: stable-4.21
+
 virt_namespace: openshift-cnv
 virt_channel: stable
 virt_bridge: br-ex
@@ -15,3 +17,6 @@ virt_localnet: localnet1
 
 cert_manager_namespace: cert-manager-operator
 cert_manager_channel: stable-v1
+
+gitops_namespace: openshift-gitops-operator
+gitops_channel: latest

@@ -96,7 +96,9 @@ To run tasks selectively `--tags` or `--skip-tags` can be used:
 | LVM Storage                         | `lvm`                | Installs the operator and creates an `LVMCluster` on the configured disk(s); wipe them manually first.                                                  |
 | Master node pod limit               | `podlimit`           | Sets `maxPods` to 500 and disables the per-core cap on master nodes; waits for the node limit to take effect.                                            |
 | OpenShift Virtualization (KubeVirt) | `kubevirt`           | Installs NMState and Virtualization, then maps `br-ex` to `localnet1` for an untagged external VM network.                                               |
-| Optional KubeVirt smoke test         | `kubevirt-smoketest` | Recreates a dedicated Fedora test VM, its untagged LAN attachment, and an LVM test disk; skipped during normal full runs.                               |
+| KubeVirt smoke test                  | `kubevirt-smoketest` | Recreates a dedicated Fedora test VM, its untagged LAN attachment, and an LVM test disk on normal runs.                                                |
+| OpenShift GitOps                     | `gitops`             | Installs the operator and prepares its default Argo CD instance for the demo.                                                                          |
+| NooBaa object storage               | `noobaa`             | Installs ODF's standalone object gateway on LVM PVCs, without Ceph OSDs or raw-disk changes.                                                           |
 
 The default router certificate covers the console and routes under the default
 ingress domain that do not specify their own certificate. It does **not**
@@ -107,6 +109,17 @@ later renewals hot-reload the secret. After a change, the role waits for the
 router deployment to roll out and for all ClusterOperators to report Available,
 not Progressing, and not Degraded. It does not restart the ingress operator
 manually.
+
+The `gitops` role grants the default Argo CD application-controller
+`cluster-admin` to deploy ssc-demo's cluster-scoped resources. Run only with
+trusted GitOps repositories. It also sets the controller's memory request to
+2Gi and limit to 8Gi, then waits for the rollout.
+
+The `noobaa` role reuses the existing `openshift-storage` OperatorGroup and
+the configured LVMS StorageClass. Run it before ssc-demo, leaving the
+demo's `components.odf.enabled` off; its ODF chart deploys Ceph instead. This
+single-node setup has no storage or database node redundancy and is outside
+ODF's documented three-node prerequisite.
 
 Applying `podlimit` changes kubelet configuration through the Machine Config
 Operator. On a single-node cluster this can reboot the node and interrupt the
@@ -119,7 +132,7 @@ runs first from `playbook.yml`.
 For example:
 
 ```
-# Fresh install without OpenShift Virtualization or its bridge mapping
+# Fresh install without OpenShift Virtualization or its smoke test
 ansible-playbook -i localhost, playbook.yml --skip-tags kubevirt
 
 # Install NMState and Virtualization (including the bridge mapping)
@@ -129,17 +142,17 @@ ansible-playbook -i localhost, playbook.yml --tags kubevirt
 ansible-playbook -i localhost, playbook.yml --tags kubevirt --skip-tags readiness
 ```
 
-## Optional KubeVirt smoke test
+## KubeVirt smoke test
 
-The smoke test is the last role in `playbook.yml`, immediately after `kubevirt`,
-but is skipped during normal full runs. After `kubevirt` and `lvm` are ready,
-run it alone:
+The smoke test follows `kubevirt` in `playbook.yml`, before `gitops` and
+`noobaa`, and runs on every full playbook run. After `kubevirt` and `lvm` are
+ready, it can also run alone. Skipping `kubevirt` skips the smoke test too:
 
 ```sh
 ansible-playbook -i localhost, playbook.yml --tags kubevirt-smoketest
 ```
 
-**Each run deletes the entire `kubevirt-smoke` namespace first.** Use it only
+**Every full run deletes the entire `kubevirt-smoke` namespace first.** Use it only
 for this test; do not put other workloads or data there. The playbook reads all
 `core` SSH public keys from MachineConfig `99-master-ssh` and gives their
 holders SSH access to the test VM. Optionally set `smoke_vm_password` in the
