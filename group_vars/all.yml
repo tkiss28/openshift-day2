@@ -1,6 +1,4 @@
 ---
-htpasswd_username: admin
-
 nmstate_namespace: openshift-nmstate
 nmstate_channel: stable
 

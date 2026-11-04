@@ -1,39 +1,36 @@
 ---
-- name: Configure htpasswd secret
-  block:
-    - name: Generate htpasswd file locally
-      community.general.htpasswd:
-        path: "{{ playbook_dir }}/.htpasswd"
-        name: "{{ htpasswd_username }}"
-        password: "{{ htpasswd_password }}"
-        crypt_scheme: bcrypt
-        mode: "0600"
-      no_log: true
+- name: Generate OpenShift-compatible bcrypt htpasswd entry
+  ansible.builtin.command:
+    argv:
+      - htpasswd
+      - -n
+      - -i
+      - -B
+      - -C
+      - "12"
+      - "{{ htpasswd_username }}"
+    stdin: "{{ htpasswd_password }}"
+  register: htpasswd_entry
+  no_log: true
 
-    - name: Read generated htpasswd file
-      ansible.builtin.slurp:
-        src: "{{ playbook_dir }}/.htpasswd"
-      register: htpasswd_file
-      no_log: true
+- name: Verify htpasswd hash is supported by OpenShift
+  ansible.builtin.assert:
+    that: htpasswd_entry.stdout.split(':')[1][:4] == '$2y$'
+  no_log: true
 
-    - name: Create/update htpasswd secret in openshift-config
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: htpasswd-secret
-            namespace: openshift-config
-          type: Opaque
-          data:
-            htpasswd: "{{ htpasswd_file.content }}"
-      no_log: true
-  always:
-    - name: Remove local htpasswd temp file
-      ansible.builtin.file:
-        path: "{{ playbook_dir }}/.htpasswd"
-        state: absent
+- name: Create/update htpasswd secret in openshift-config
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: htpasswd-secret
+        namespace: openshift-config
+      type: Opaque
+      data:
+        htpasswd: "{{ (htpasswd_entry.stdout ~ '\n') | b64encode }}"
+  no_log: true
 
 - name: Read current OAuth deployment generation
   kubernetes.core.k8s_info:
