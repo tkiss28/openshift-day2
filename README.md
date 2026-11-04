@@ -36,16 +36,18 @@ oc edit machineconfig 99-master-ssh
 
 ### Wipe the storage disk (manual, destructive — not automated)
 
-Before running the day-2 playbook, make sure the disk(s) listed in
-`group_vars/all.yml` under `lvms_device_paths` are clean of any leftover
-filesystem/LVM signatures from a previous install, e.g.:
+This is required if the node has more disks and LVM storage was used on it
+before. Confirm `/dev/nvme0n1` is the **data disk, not the OS disk**, and that
+`vg1` belongs only to it (see `lvms_device_paths` and `lvms_vg_name` in
+`group_vars/all.yml`). Then, before running `storage`:
 
-```
-oc debug node/<node> -- chroot /host wipefs -fa /dev/nvme0n1
+```sh
+$NODE=<node>
+oc debug node/$NODE -- chroot /host sh -c 'vgchange -an vg1 && wipefs -fa /dev/nvme0n1'
 ```
 
-This is deliberately a manual step — it's destructive and worth eyeballing the
-device name each time rather than having a playbook wipe a disk unattended.
+Deactivating the old VG clears its live LVM mappings; `wipefs` clears the disk
+signatures.
 
 ## Running the playbook
 
