@@ -3,6 +3,12 @@
 Day-2 configuration for OpenShift clusters, to install common operators and get
 the cluster from an freshly installed state to a consumable state.
 
+Ongoing, noncritical cluster tuning lives in the sibling
+[openshift-infra](https://github.com/tkiss28/openshift-infra) GitOps repo. This
+playbook keeps bootstrap and critical infrastructure in Ansible; the Dell SNO's
+pod limit and Argo CD controller memory settings are now managed there, not by
+this playbook.
+
 ## Prerequisites
 
 - `oc` CLI installed and logged in to the target cluster
@@ -61,13 +67,12 @@ cp -n secrets.yml.example secrets.yml
 ```
 
 Create the Cloudflare token under **Account API Tokens** and scope it to the
-public DNS zone containing the cluster's ingress domain, with
-**Zone → DNS → Edit** and **Zone → Zone → Read** permissions. The email address
-is not secret, but is the ACME account contact;
-do not use `noreply@redhat.com`. cert-manager discovers the default ingress
-domain from OpenShift, so you do not need to enter the certificate DNS names
-yourself. Check that this domain belongs to your Cloudflare-managed zone before
-running:
+public DNS zone containing the cluster's ingress domain, with **Zone → DNS →
+Edit** and **Zone → Zone → Read** permissions. The email address is not secret,
+but is the ACME account contact; do not use `noreply@redhat.com`. cert-manager
+discovers the default ingress domain from OpenShift, so you do not need to enter
+the certificate DNS names yourself. Check that this domain belongs to your
+Cloudflare-managed zone before running:
 
 ```
 oc get ingresscontroller default -n openshift-ingress-operator -o jsonpath='{.status.domain}'
@@ -94,11 +99,10 @@ To run tasks selectively `--tags` or `--skip-tags` can be used:
 | Local HTPasswd admin                | `auth`               | Creates the user, grants `cluster-admin`, and waits for the OAuth rollout if the identity provider changes.                                             |
 | cert-manager + Let's Encrypt        | `cert-manager`       | Installs the operator, issues a certificate for the default ingress domain and its wildcard via Cloudflare DNS-01, then configures the default router.  |
 | LVM Storage                         | `lvm`                | Installs the operator and creates an `LVMCluster` on the configured disk(s); wipe them manually first.                                                  |
-| Master node pod limit               | `podlimit`           | Sets `maxPods` to 500 and disables the per-core cap on master nodes; waits for the node limit to take effect.                                            |
-| OpenShift Virtualization (KubeVirt) | `kubevirt`           | Installs NMState and Virtualization, then maps `br-ex` to `localnet1` for an untagged external VM network.                                               |
-| KubeVirt smoke test                  | `kubevirt-smoketest` | Recreates a dedicated Fedora test VM, its untagged LAN attachment, and an LVM test disk on normal runs.                                                |
-| OpenShift GitOps                     | `gitops`             | Installs the operator and prepares its default Argo CD instance for the demo.                                                                          |
-| NooBaa object storage               | `noobaa`             | Installs ODF's standalone object gateway on LVM PVCs, without Ceph OSDs or raw-disk changes.                                                           |
+| OpenShift Virtualization (KubeVirt) | `kubevirt`           | Installs NMState and Virtualization, then maps `br-ex` to `localnet1` for an untagged external VM network.                                              |
+| KubeVirt smoke test                 | `kubevirt-smoketest` | Recreates a dedicated Fedora test VM, its untagged LAN attachment, and an LVM test disk on normal runs.                                                 |
+| OpenShift GitOps                    | `gitops`             | Installs the operator and prepares its default Argo CD instance for the demo.                                                                           |
+| NooBaa object storage               | `noobaa`             | Installs ODF's standalone object gateway on LVM PVCs, without Ceph OSDs or raw-disk changes.                                                            |
 
 The default router certificate covers the console and routes under the default
 ingress domain that do not specify their own certificate. It does **not**
@@ -112,19 +116,13 @@ manually.
 
 The `gitops` role grants the default Argo CD application-controller
 `cluster-admin` to deploy ssc-demo's cluster-scoped resources. Run only with
-trusted GitOps repositories. It also sets the controller's memory request to
-2Gi and limit to 8Gi, then waits for the rollout.
+trusted GitOps repositories.
 
-The `noobaa` role reuses the existing `openshift-storage` OperatorGroup and
-the configured LVMS StorageClass. Run it before ssc-demo, leaving the
-demo's `components.odf.enabled` off; its ODF chart deploys Ceph instead. This
+The `noobaa` role reuses the existing `openshift-storage` OperatorGroup and the
+configured LVMS StorageClass. Run it before ssc-demo, leaving the demo's
+`components.odf.enabled` off; its ODF chart deploys Ceph instead. This
 single-node setup has no storage or database node redundancy and is outside
 ODF's documented three-node prerequisite.
-
-Applying `podlimit` changes kubelet configuration through the Machine Config
-Operator. On a single-node cluster this can reboot the node and interrupt the
-API; allow for downtime and have console access before running it. The role
-waits for master nodes to report a pod capacity of 500 before the next role.
 
 Each tagged section lives in `roles/<role>/tasks/main.yml`; the readiness check
 runs first from `playbook.yml`.
@@ -152,9 +150,9 @@ ready, it can also run alone. Skipping `kubevirt` skips the smoke test too:
 ansible-playbook -i localhost, playbook.yml --tags kubevirt-smoketest
 ```
 
-**Every full run deletes the entire `kubevirt-smoke` namespace first.** Use it only
-for this test; do not put other workloads or data there. The playbook reads all
-`core` SSH public keys from MachineConfig `99-master-ssh` and gives their
+**Every full run deletes the entire `kubevirt-smoke` namespace first.** Use it
+only for this test; do not put other workloads or data there. The playbook reads
+all `core` SSH public keys from MachineConfig `99-master-ssh` and gives their
 holders SSH access to the test VM. Optionally set `smoke_vm_password` in the
 gitignored `secrets.yml` for **console-only** password login (requires `openssl`
 on the Ansible host); SSH password authentication stays disabled. If there are
@@ -164,10 +162,10 @@ The test leaves a Fedora VM running with an untagged LAN attachment and a blank
 LVM-backed disk. It needs access to `quay.io/containerdisks/fedora:latest` and
 DHCP on the LAN. Check the VM's LAN IP (reported by the guest agent if present,
 otherwise from your DHCP leases or VM console); the playbook prints it when
-reported. Then ping or SSH as `fedora`
-using a private key matching one in `99-master-ssh`. `Running` and a bound disk
-do not by themselves prove that LAN connectivity works. The VM's boot disk is
-temporary; its blank test disk is on `lvms-vg1`.
+reported. Then ping or SSH as `fedora` using a private key matching one in
+`99-master-ssh`. `Running` and a bound disk do not by themselves prove that LAN
+connectivity works. The VM's boot disk is temporary; its blank test disk is on
+`lvms-vg1`.
 
 ```sh
 oc -n kubevirt-smoke get vmi fedora -o jsonpath='{.status.interfaces[?(@.name=="lan")].ipAddresses}'
