@@ -2,3 +2,4 @@ secrets.yml
 .htpasswd
 *.retry
 .venv/
+__pycache__/
