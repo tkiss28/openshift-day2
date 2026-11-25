@@ -75,6 +75,25 @@
   retries: 60
   delay: 10
 
+- name: Read existing Argo CD admin group
+  kubernetes.core.k8s_info:
+    api_version: user.openshift.io/v1
+    kind: Group
+    name: cluster-admins
+  register: gitops_admin_group
+
+- name: Grant the HTPasswd user Argo CD admin access
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: user.openshift.io/v1
+      kind: Group
+      metadata:
+        name: cluster-admins
+      users: >-
+        {{ ((gitops_admin_group.resources | map(attribute='users', default=[]) | flatten)
+            + [htpasswd_username]) | unique(case_sensitive=true) | list }}
+
 - name: Grant Argo CD application-controller cluster-admin for ssc-demo
   kubernetes.core.k8s:
     state: present

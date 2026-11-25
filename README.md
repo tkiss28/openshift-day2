@@ -21,7 +21,7 @@ this playbook.
   ```
   python3 -m venv .venv
   . .venv/bin/activate
-  python -m pip install ansible-core kubernetes jsonpatch
+  python -m pip install -r requirements.txt
   ansible-galaxy collection install -r requirements.yml
   ```
   Run the playbook with the virtual environment active. The local tasks use the
@@ -117,6 +117,12 @@ manually.
 The `gitops` role grants the default Argo CD application-controller
 `cluster-admin` to deploy ssc-demo's cluster-scoped resources. Run only with
 trusted GitOps repositories.
+
+It also adds `htpasswd_username` to the OpenShift `cluster-admins` group,
+preserving existing members. The default Argo CD SSO policy maps this group to
+Argo CD's admin role; a direct Kubernetes `cluster-admin` binding alone does not
+grant Argo CD access. Log out of Argo CD and back in after a membership change
+to refresh the SSO group claims.
 
 The `noobaa` role reuses the existing `openshift-storage` OperatorGroup and the
 configured LVMS StorageClass. Run it before ssc-demo, leaving the demo's
